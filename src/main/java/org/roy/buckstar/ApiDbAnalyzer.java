@@ -4,9 +4,7 @@ import com.github.javaparser.JavaParser;
 import com.github.javaparser.ParserConfiguration;
 import com.github.javaparser.ast.CompilationUnit;
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration;
-import com.github.javaparser.ast.body.FieldDeclaration;
 import com.github.javaparser.ast.body.MethodDeclaration;
-import com.github.javaparser.ast.body.VariableDeclarator;
 import com.github.javaparser.ast.expr.AnnotationExpr;
 import com.github.javaparser.ast.expr.MethodCallExpr;
 import com.github.javaparser.ast.expr.NormalAnnotationExpr;
@@ -21,17 +19,18 @@ import com.github.javaparser.symbolsolver.resolution.typesolvers.ReflectionTypeS
 import com.github.javaparser.utils.SourceRoot;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import org.roy.buckstar.common.Util;
 
 import java.io.File;
 import java.io.IOException;
-import java.io.OutputStream;
 import java.io.PrintStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.stream.Stream;
+
+import static org.roy.buckstar.common.GlobalConstants.*;
 
 
 /**
@@ -50,13 +49,9 @@ public class ApiDbAnalyzer {
      */
     private static final Map<String, String> entityToTableMap = new HashMap<>();
     /**
-     * Base package to scan for Java source files
-     */
-    private static final String basePackage = "com.mkyong.book";
-    /**
      * Root path to the Java source files
      */
-    private static final Path sourcePath = Paths.get("D:/SRC/SPRING-BOOT-MASTER/SPRING-BOOT-MASTER/SPRING-DATA-JPA-MYSQL/SRC/main/java");
+    private static final Path sourcePath = Paths.get(srcPath);
 
     /**
      * Main entry point of the analyzer.
@@ -67,7 +62,7 @@ public class ApiDbAnalyzer {
      */
     public static void main(String[] args) throws IOException {
         PrintStream originalSystemOut = System.out;
-        setSystemOutOff();
+        Util.setSystemOutOff(); // Set SYSOUT OFF
         CombinedTypeSolver combinedTypeSolver = new CombinedTypeSolver();
         combinedTypeSolver.add(new ReflectionTypeSolver());
         combinedTypeSolver.add(new JavaParserTypeSolver(new File(sourcePath.toString())));
@@ -75,11 +70,11 @@ public class ApiDbAnalyzer {
 
         ParserConfiguration parserConfiguration = new ParserConfiguration();
         parserConfiguration.setSymbolResolver(symbolSolver);
-        JavaParser javaParser = new JavaParser(parserConfiguration);
 
         SourceRoot sourceRoot = new SourceRoot(sourcePath.resolve(basePackage.replace(".", "/")), parserConfiguration);
 
-        sourceRoot.parse("entities", (localPath, absolutePath, result) -> {
+        // Parse all entity classes to build the entity-to-table mapping
+        sourceRoot.parse(entityPath, (localPath, absolutePath, result) -> {
             if (result.isSuccessful() && result.getResult().isPresent()) {
                 CompilationUnit cu = result.getResult().get();
                 cu.findAll(ClassOrInterfaceDeclaration.class).forEach(clazz -> {
@@ -106,7 +101,8 @@ public class ApiDbAnalyzer {
             return SourceRoot.Callback.Result.DONT_SAVE;
         });
 
-        sourceRoot.parse("controllers", (localPath, absolutePath, result) -> {
+        // Parse all controller classes to extract REST API endpoints and their associated service calls
+        sourceRoot.parse(controllerPath, (localPath, absolutePath, result) -> {
             if (result.isSuccessful() && result.getResult().isPresent()) {
                 CompilationUnit cu = result.getResult().get();
                 cu.findAll(ClassOrInterfaceDeclaration.class).forEach(clazz -> {
@@ -118,21 +114,27 @@ public class ApiDbAnalyzer {
             return SourceRoot.Callback.Result.DONT_SAVE;
         });
 
-        setSystemOutOn(originalSystemOut);
+        // Set SYSOUT ON
+        Util.setSystemOutOn(originalSystemOut);
         Gson gson = new GsonBuilder().setPrettyPrinting().create();
         System.out.println(gson.toJson(resultJson));
     }
 
     /**
      * Processes a REST controller class to extract API endpoints and their associated service calls.
+     * For each controller method annotated with a request mapping, this method:
+     * 1. Extracts the API endpoint path from the mapping annotation
+     * 2. Identifies the service method being called
+     * 3. Traces the service method to find all database operations
+     * 4. Stores the results in the resultJson map
      *
      * @param clazz      The controller class declaration to process
-     * @param typeSolver The type solver for resolving symbol references
+     * @param typeSolver The type solver used for resolving symbol references in the source code
      */
     private static void processController(ClassOrInterfaceDeclaration clazz, TypeSolver typeSolver) {
         clazz.findAll(MethodDeclaration.class).forEach(method -> {
             Optional<AnnotationExpr> mappingAnnotation = method.getAnnotations().stream()
-                    .filter(ApiDbAnalyzer::isRequestMapping)
+                    .filter(Util::isRequestMapping)
                     .findFirst();
 
             mappingAnnotation.ifPresent(annotation -> {
@@ -142,7 +144,7 @@ public class ApiDbAnalyzer {
                 String serviceMethod = serviceCall.map(MethodCallExpr::getNameAsString).orElse("unknownServiceCall");
                 List<Map<String, String>> dbOps = new ArrayList<>();
 
-                serviceCall.ifPresent(expr -> traceServiceMethod(expr, typeSolver, dbOps, new HashSet<>()));
+                serviceCall.ifPresent(expr -> traceServiceMethod(expr, typeSolver, dbOps, new HashSet<>(), sourcePath));
 
                 Map<String, Object> apiInfo = new HashMap<>();
                 apiInfo.put("serviceMethod", serviceMethod);
@@ -155,13 +157,20 @@ public class ApiDbAnalyzer {
 
     /**
      * Recursively traces a service method call to find all database operations.
+     * This method:
+     * 1. Resolves the method declaration using the type solver
+     * 2. Finds the implementation class (either direct or *Impl class)
+     * 3. Parses the implementation source to find repository method calls
+     * 4. Identifies database operations (SELECT, INSERT, UPDATE, DELETE)
+     * 5. Recursively traces any nested service method calls
      *
      * @param expr       The method call expression to analyze
      * @param typeSolver The type solver for resolving symbol references
-     * @param dbOps      List to store discovered database operations
+     * @param dbOps      List to accumulate discovered database operations
      * @param visited    Set of already processed methods to prevent infinite recursion
+     * @param sourcePath The base path for resolving source files
      */
-    private static void traceServiceMethod(MethodCallExpr expr, TypeSolver typeSolver, List<Map<String, String>> dbOps, Set<String> visited) {
+    private static void traceServiceMethod(MethodCallExpr expr, TypeSolver typeSolver, List<Map<String, String>> dbOps, Set<String> visited, Path sourcePath) {
         try {
             ResolvedMethodDeclaration methodDecl = expr.resolve();
             String methodKey = methodDecl.getQualifiedSignature();
@@ -176,7 +185,7 @@ public class ApiDbAnalyzer {
             String code = Files.readString(targetPath);
 
             ParserConfiguration serviceParserConfig = new ParserConfiguration();
-            serviceParserConfig.setSymbolResolver(new JavaSymbolSolver((CombinedTypeSolver) typeSolver));
+            serviceParserConfig.setSymbolResolver(new JavaSymbolSolver(typeSolver));
             JavaParser serviceJavaParser = new JavaParser(serviceParserConfig);
 
             CompilationUnit cu = serviceJavaParser.parse(code).getResult().orElseThrow(
@@ -184,186 +193,41 @@ public class ApiDbAnalyzer {
             );
 
             System.out.println("Method: " + methodDecl.getName() + "-".repeat(100) + methodDecl.getClassName());
-            Map<String, String> declaredRepositoriesAndEntities = getDeclaredRepositoriesAndEntities(cu);
+            Map<String, String> declaredRepositoriesAndEntities = Util.getDeclaredRepositoriesAndEntities(cu, sourcePath, entityToTableMap);
 
             System.out.println("Repositories: " + declaredRepositoriesAndEntities);
 
             cu.findAll(MethodDeclaration.class).stream()
                     .filter(m -> m.getNameAsString().equals(methodDecl.getName()))
-                    .forEach(serviceMethod -> {
-                        serviceMethod.findAll(MethodCallExpr.class).forEach(call -> {
-                            try {
-                                String calledName = call.getNameAsString().toLowerCase();
-                                System.out.println("Found call: " + call + " to: " + calledName);
-                                String tableName = resolveEntityNameFromCall(call, declaredRepositoriesAndEntities).map(entityToTableMap::get).orElse("unknown");
-                                System.out.println("Resolved to Table: " + tableName);
-                                if (!"unknown".equals(tableName) && (calledName.contains("save") || calledName.contains("insert"))) {
-                                    dbOps.add(Map.of("operation", "INSERT", "table", tableName, "methdCall", call.toString()));
-                                } else if (!"unknown".equals(tableName) && (calledName.contains("delete"))) {
-                                    dbOps.add(Map.of("operation", "DELETE", "table", tableName, "methodCall", call.toString()));
-                                } else if (!"unknown".equals(tableName) && (calledName.contains("update"))) {
-                                    dbOps.add(Map.of("operation", "UPDATE", "table", tableName, "methodCall", call.toString()));
-                                } else if (!"unknown".equals(tableName) && (calledName.contains("find") || calledName.contains("get"))) {
-                                    dbOps.add(Map.of("operation", "SELECT", "table", tableName, "methodCall", call.toString()));
-                                } else {
-                                    traceServiceMethod(call, typeSolver, dbOps, visited); // recursively resolve
-                                }
-                            } catch (Exception ex) {
-                                ex.printStackTrace();
-                                System.err.println("Nested call failed: " + call + " due to: " + ex.getMessage());
+                    .forEach(serviceMethod -> serviceMethod.findAll(MethodCallExpr.class).forEach(call -> {
+                        try {
+                            String calledName = call.getNameAsString().toLowerCase();
+                            System.out.println("Found call: " + call + " to: " + calledName);
+                            System.out.println("entityToTableMap: " + entityToTableMap);
+                            String tableOrQuery = Util.resolveEntityNameQueryFromCall(call, declaredRepositoriesAndEntities, entityToTableMap, sourcePath).orElse("unknown");
+
+                            System.out.println("Table or Query: " + tableOrQuery);
+
+                            if (!"unknown".equals(tableOrQuery) && (tableOrQuery.toUpperCase().indexOf("QUERY[")==0)) {
+                                dbOps.add(Map.of("operation", "QUERY", "query", tableOrQuery, "methodCall", call.toString()));
+                            } else if (!"unknown".equals(tableOrQuery) && (calledName.contains("save") || calledName.contains("insert"))) {
+                                dbOps.add(Map.of("operation", "INSERT", "table", tableOrQuery, "methodCall", call.toString()));
+                            } else if (!"unknown".equals(tableOrQuery) && (calledName.contains("delete"))) {
+                                dbOps.add(Map.of("operation", "DELETE", "table", tableOrQuery, "methodCall", call.toString()));
+                            } else if (!"unknown".equals(tableOrQuery) && (calledName.contains("update"))) {
+                                dbOps.add(Map.of("operation", "UPDATE", "table", tableOrQuery, "methodCall", call.toString()));
+                            } else if (!"unknown".equals(tableOrQuery) && (calledName.contains("find") || calledName.contains("get"))) {
+                                dbOps.add(Map.of("operation", "SELECT", "table", tableOrQuery, "methodCall", call.toString()));
+                            } else {
+                                traceServiceMethod(call, typeSolver, dbOps, visited, sourcePath); // recursively resolve
                             }
-                        });
-                    });
+                        } catch (Exception ex) {
+                            System.err.println("Nested call failed: " + call + " due to: " + ex.getMessage());
+                        }
+                    }));
         } catch (Exception e) {
             System.err.println("Failed to resolve method: " + expr + " due to: " + e.getMessage());
         }
     }
 
-    /**
-     * Extracts repository fields and their associated entity types from a compilation unit.
-     *
-     * @param cu The compilation unit to analyze
-     * @return Map of repository variable names to their entity type names
-     */
-    private static Map<String, String> getDeclaredRepositoriesAndEntities(CompilationUnit cu) {
-        Map<String, String> result = new HashMap<>();
-        cu.findAll(FieldDeclaration.class)
-                .stream()
-                .forEach(field -> {
-                    try {
-                        String fieldType = field.resolve().getType().describe();
-                        for (VariableDeclarator var : field.getVariables()) {
-                            result.put(var.getNameAsString(), getRepositoryTable(fieldType));
-                        }
-                    } catch (Exception e) {
-                        e.printStackTrace();
-                    }
-                });
-        return result;
-    }
-
-    /**
-     * Resolves the entity type from a repository class name.
-     *
-     * @param repositoryClass Fully qualified name of the repository class
-     * @return The entity class name or "NOTFOUND" if resolution fails
-     */
-    private static String getRepositoryTable(String repositoryClass) {
-        // repositoryClass is the fully qualified class name of the JPA Repository
-        // This method should return a map with entity class name as key and table name as value
-        try {
-            Path repoPath = sourcePath.resolve(repositoryClass.replace(".", "/") + ".java");
-            if (!Files.exists(repoPath)) {
-                System.err.println("Repository source not found: " + repoPath);
-                return "NOTFOUND";
-            }
-            String code = Files.readString(repoPath);
-            CompilationUnit cu = new JavaParser().parse(code).getResult().orElse(null);
-            if (cu == null) return "NOTFOUND";
-
-            Optional<ClassOrInterfaceDeclaration> repoClass = cu.findFirst(ClassOrInterfaceDeclaration.class);
-            if (repoClass.isPresent()) {
-                // Find the entity type argument in the repository interface
-                if (repoClass.get().getExtendedTypes().isNonEmpty()) {
-
-                    System.out.println("Found repository: " + repoClass.get().getFullyQualifiedName()
-                            + " with entity: "
-                            + repoClass.get().getExtendedTypes().get(0).getTypeArguments().flatMap(args -> args.stream().findFirst()).get());
-
-                    String generic = repoClass.get().getExtendedTypes().get(0).getTypeArguments()
-                            .flatMap(args -> args.stream().findFirst())
-                            .map(Object::toString)
-                            .orElse(null);
-
-                    System.out.println("Generic: " + generic);
-
-                    if (generic != null && entityToTableMap.containsKey(generic)) {
-                        return generic;
-                    }
-                }
-            }
-        } catch (Exception e) {
-            System.err.println("Failed to analyze repository: " + repositoryClass + " due to: " + e.getMessage());
-        }
-        return "NOTFOUND";
-    }
-
-    /**
-     * Resolves the entity name from a repository method call.
-     *
-     * @param call                            The method call to analyze
-     * @param declaredRepositoriesAndEntities Map of known repositories and their entities
-     * @return Optional containing the entity name if found
-     */
-    private static Optional<String> resolveEntityNameFromCall(MethodCallExpr call, Map<String, String> declaredRepositoriesAndEntities) {
-        String calledName = call.getNameAsString().toLowerCase();
-        String entityTable =null;
-        // Resolve from Repository
-        try {
-            entityTable = call.resolve().getQualifiedSignature();
-        } catch (Exception ex) {
-            AtomicReference<String> scope = new AtomicReference<>("");
-            call.getScope().ifPresent(s -> scope.set(s.toString()));
-            System.out.println("Found from CU with scope: " + call.getNameAsString() + " " + scope.get() + " " +declaredRepositoriesAndEntities.get(scope.get()));
-            System.out.println("Declared Repositories and Entities: " + declaredRepositoriesAndEntities);
-            System.out.println("calledName: " + calledName);
-            entityTable = declaredRepositoriesAndEntities.get(scope.get());
-            System.out.println("Resolved to Entity Table: " + entityTable);
-
-            System.out.println("Resolved from Repository: " + scope.get());
-
-            if (entityToTableMap.containsKey(entityTable)) {
-                return Optional.of(entityTable);
-            }
-
-        }
-
-        // Entity
-        return call.getArguments().stream()
-                .flatMap(arg -> {
-                    try {
-                        System.out.println("Resolved from Argument: " + arg);
-                        String typeName = arg.calculateResolvedType().describe();
-                        String simpleName = typeName.substring(typeName.lastIndexOf('.') + 1);
-                        if (entityToTableMap.containsKey(simpleName)) {
-                            return Stream.of(simpleName);
-                        }
-                    } catch (Exception e) {
-                        System.err.println("Warning: Failed to resolve argument type for: " + arg + " due to: " + e.getMessage());
-                    }
-                    return Stream.empty();
-                })
-                .findFirst();
-    }
-
-    /**
-     * Checks if an annotation is a Spring MVC request mapping annotation.
-     *
-     * @param annotation The annotation to check
-     * @return true if the annotation is a request mapping annotation
-     */
-    private static boolean isRequestMapping(AnnotationExpr annotation) {
-        return annotation.getNameAsString().matches("(GetMapping|PostMapping|PutMapping|DeleteMapping|RequestMapping)");
-    }
-
-    /**
-     * Disables System.out output by redirecting it to a no-op stream.
-     */
-    public static void setSystemOutOff(){
-        System.setOut(new PrintStream(new OutputStream() {
-            @Override
-            public void write(int b) throws IOException {
-                // Do Nothing
-            }
-        }));
-    }
-
-    /**
-     * Restores System.out to the original PrintStream.
-     *
-     * @param originalSystemOut The original System.out PrintStream to restore
-     */
-    public static void setSystemOutOn(PrintStream originalSystemOut){
-        System.setOut(originalSystemOut);
-    }
 }
