@@ -172,6 +172,7 @@ public class ApiDbAnalyzer {
      */
     private static void traceServiceMethod(MethodCallExpr expr, TypeSolver typeSolver, List<Map<String, String>> dbOps, Set<String> visited, Path sourcePath) {
         try {
+            // Resolve the Service class from Method Call Expression
             ResolvedMethodDeclaration methodDecl = expr.resolve();
             String methodKey = methodDecl.getQualifiedSignature();
             if (visited.contains(methodKey)) return;
@@ -180,7 +181,9 @@ public class ApiDbAnalyzer {
             ResolvedReferenceTypeDeclaration declaringType = methodDecl.declaringType();
             String qualifiedClassName = declaringType.getQualifiedName();
 
-            Path implPath = sourcePath.resolve((qualifiedClassName + "Impl").replace(".services", ".serviceimpl").replace(".", "/") + ".java");
+            // Find the path of Service Class Implementation from the name of Service class
+            String implDirectory = basePackage.replace(".", "/") + "/" + serviceImplPath;
+            Path implPath = Util.resolveImplClassPath(sourcePath, qualifiedClassName, implDirectory);
             Path targetPath = Files.exists(implPath) ? implPath : sourcePath.resolve(qualifiedClassName.replace(".", "/") + ".java");
             String code = Files.readString(targetPath);
 
@@ -229,5 +232,4 @@ public class ApiDbAnalyzer {
             System.err.println("Failed to resolve method: " + expr + " due to: " + e.getMessage());
         }
     }
-
 }

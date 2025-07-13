@@ -20,8 +20,7 @@ import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 
-import static org.roy.buckstar.common.GlobalConstants.basePackage;
-import static org.roy.buckstar.common.GlobalConstants.repositoryPath;
+import static org.roy.buckstar.common.GlobalConstants.*;
 
 
 /**
@@ -173,6 +172,48 @@ public class Util {
                     return Stream.empty();
                 })
                 .findFirst();
+    }
+
+    /**
+     * Resolves the implementation class path for a given qualified service class name.
+     * Attempts to find the corresponding implementation file in the source directory or a specified implementation directory.
+     *
+     * @param sourcePath         The root path of the source code files
+     * @param qualifiedClassName The fully qualified name of the service class
+     * @param implDirectory      The directory where service implementations are located
+     * @return Path to the implementation class file if found, otherwise the expected path
+     */
+    public static Path resolveImplClassPath(Path sourcePath, String qualifiedClassName, String implDirectory) {
+
+        Path retPath = sourcePath.resolve((qualifiedClassName + "Impl").replace(".services", ".serviceimpl").replace(".", "/") + ".java");
+
+        // Check if the file represented by the retPath actually exists
+        if (!Files.exists(retPath)) {
+            // Go through the files in the implementation directory of the service and check if it is the implementation of the service. If yes, return the Path
+            // This assumes there is only one implementation for the Service class
+            Path implDir = sourcePath.resolve(implDirectory);
+            try (Stream<Path> files = Files.list(implDir)) {
+                for (Path file : (Iterable<Path>) files::iterator) {
+                    if (Files.isRegularFile(file) && file.getFileName().toString().endsWith(".java")) {
+                        String code = Files.readString(file);
+                        CompilationUnit cu = new JavaParser().parse(code).getResult().orElse(null);
+                        if (cu != null) {
+                            Optional<ClassOrInterfaceDeclaration> clazz = cu.findFirst(ClassOrInterfaceDeclaration.class);
+                            if (clazz.isPresent() && clazz.get().getImplementedTypes().stream()
+                                    .anyMatch(t -> {
+                                        return t.getNameAsString().equals(qualifiedClassName.substring(qualifiedClassName.lastIndexOf('.') + 1));
+                                    })) {
+                                return file;
+                            }
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                System.err.println("Error searching for implementation: " + e.getMessage());
+            }
+        }
+
+        return retPath;
     }
 
     /**

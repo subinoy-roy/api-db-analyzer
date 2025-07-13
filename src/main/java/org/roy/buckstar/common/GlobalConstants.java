@@ -11,5 +11,6 @@ public class GlobalConstants {
     public static final String entityPath = "entities";
     public static final String repositoryPath = "repository";
     public static final String servicePath = "services";
+    public static final String serviceImplPath = "serviceimpl";
     public static final String controllerPath = "controllers";
 }
