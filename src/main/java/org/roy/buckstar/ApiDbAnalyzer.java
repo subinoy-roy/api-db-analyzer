@@ -1,5 +1,8 @@
 package org.roy.buckstar;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.LoggerContext;
 import com.github.javaparser.JavaParser;
 import com.github.javaparser.ParserConfiguration;
 import com.github.javaparser.ast.CompilationUnit;
@@ -19,6 +22,7 @@ import com.github.javaparser.symbolsolver.resolution.typesolvers.ReflectionTypeS
 import com.github.javaparser.utils.SourceRoot;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import org.roy.buckstar.common.LogbackOutputStream;
 import org.roy.buckstar.common.Util;
 
 import java.io.File;
@@ -61,6 +65,13 @@ public class ApiDbAnalyzer {
      * @throws IOException If there's an error reading source files
      */
     public static void main(String[] args) throws IOException {
+
+        LoggerContext loggerContext = (LoggerContext) org.slf4j.LoggerFactory.getILoggerFactory();
+        Logger rootLogger = loggerContext.getLogger("ROOT");
+
+        System.setOut(new PrintStream(new LogbackOutputStream(rootLogger,Level.INFO),true));
+        System.setErr(new PrintStream(new LogbackOutputStream(rootLogger,Level.ERROR),true));
+
         PrintStream originalSystemOut = System.out;
         Util.setSystemOutOff(); // Set SYSOUT OFF
         CombinedTypeSolver combinedTypeSolver = new CombinedTypeSolver();
